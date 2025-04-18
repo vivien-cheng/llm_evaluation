@@ -1,4 +1,4 @@
-# LLM Evaluation Suite
+# LLM Evaluation Project
 
 ## Overview
 
@@ -21,7 +21,7 @@ The primary goal is to offer a structured way to generate, filter, and evaluate 
 ## Repository Structure
 
 ```bash
-llm_evaluation_suite/
+llm_evaluation
 │
 ├── .env                       # <-- Stores your secret API keys (DO NOT COMMIT TO GIT)
 ├── .env.example               # Example environment file
