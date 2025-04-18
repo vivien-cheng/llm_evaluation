@@ -86,7 +86,7 @@ llm_evaluation
 1.  **Clone the repository:**
     ```bash
     git clone <your-repo-url>
-    cd llm_evaluation_suite
+    cd llm_evaluation
     ```
 
 2.  **Set up a virtual environment (recommended):**
