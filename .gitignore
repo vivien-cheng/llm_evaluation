@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE / Editor specific
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data / Outputs (optional - depends if you want to track small examples)
+# data/raw/*
+# data/processed/*
+# outputs/*
+# !outputs/.gitkeep # Keep empty directories if needed
+
+# Config / Secrets
+.env
+*.log
+*.tmp
+secrets.yaml
+config/secrets.yaml
+
+# Distribution / packaging
+.eggs/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Lightning AI
+.lightning/
+
+# Other
+*.DS_Store
