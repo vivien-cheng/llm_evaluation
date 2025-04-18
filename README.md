@@ -116,7 +116,7 @@ llm_evaluation
 ### Configuration
 
 1.  **API Keys (`.env` file):**
-    * Copy `.env.example` to a new file named `.env` in the project root (`llm_evaluation_suite/.env`).
+    * Copy `.env.example` to a new file named `.env` in the project root (`llm_evaluation/.env`).
     * Open `.env` and add your API key(s) for the LLM Judge service you intend to use (e.g., OpenAI). **Ensure the variable name matches the one in `config/models.yaml`**.
         ```dotenv
         # Example for OpenAI:
