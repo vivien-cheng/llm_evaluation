@@ -2,292 +2,306 @@ import argparse
 import json
 import os
 import sys
-from tqdm import tqdm
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from typing import Dict, List, Any, Optional # Ensure typing is imported
+import logging
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+from typing import Dict, List, Any, Optional
 
 # --- Path Setup ---
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-# --- End Path Setup ---
+try:
+    from hta_evaluation_harness.utils import load_json, save_json
+except ImportError:
+    print("Warning: Could not import utils from hta_evaluation_harness. Using basic local file handling.")
+    # Basic local file handling functions (same as provided previously)
+    def load_json(file_path, load_by_line=False):
+        # ... (load_json implementation from previous response) ...
+         if not os.path.exists(file_path): return None
+         data = []
+         try:
+             with open(file_path, 'r', encoding='utf-8') as f:
+                 if load_by_line:
+                     for line in f:
+                         if line.strip():
+                             try: data.append(json.loads(line))
+                             except json.JSONDecodeError: print(f"Warning: Skipping invalid JSON line: {line[:100]}")
+                     return data
+                 else: # Try loading as single object or fallback to JSONL
+                     content = f.read()
+                     if not content.strip(): return []
+                     try: return [json.loads(content)]
+                     except json.JSONDecodeError:
+                         f.seek(0)
+                         for line in f:
+                              if line.strip():
+                                  try: data.append(json.loads(line))
+                                  except json.JSONDecodeError: print(f"Warning: Skipping invalid JSON line: {line[:100]}")
+                         return data
+         except Exception as e: print(f"Error loading JSON from {file_path}: {e}"); return None
 
-# --- Model Loading and Generation Logic ---
-MODEL_CACHE = {} # Simple cache to avoid reloading model/tokenizer
+    def save_json(data, file_path, save_by_line=False, indent=2):
+        # ... (save_json implementation from previous response) ...
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        with open(file_path, 'w', encoding='utf-8') as f:
+            if save_by_line:
+                for item in data: f.write(json.dumps(item, ensure_ascii=False) + '\n')
+            else: json.dump(data, f, ensure_ascii=False, indent=indent)
 
-def load_model_and_tokenizer(model_name_or_path, device):
-    """Loads model and tokenizer, using a simple cache."""
-    if model_name_or_path in MODEL_CACHE:
-        print(f"Using cached model/tokenizer for {model_name_or_path} on {device}")
-        return MODEL_CACHE[model_name_or_path]
-    print(f"Loading model: {model_name_or_path}...")
+# --- Logging Setup ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# --- Model Loading Cache ---
+MODEL_CACHE = {}
+
+def load_model(model_name_or_path, device_type_str):
+    """Loads the generation model and tokenizer."""
+    cache_key = f"{model_name_or_path}_{device_type_str}"
+    if cache_key in MODEL_CACHE:
+        logger.info(f"Using cached model/tokenizer for {model_name_or_path}")
+        return MODEL_CACHE[cache_key]
+
+    logger.info(f"Loading model: {model_name_or_path}...")
     try:
-        # Determine dtype based on device
-        # Use bfloat16 for faster computation and lower memory on compatible GPUs (like A10G/L40S)
-        dtype = torch.bfloat16 if device.type == 'cuda' and torch.cuda.is_bf16_supported() else torch.float32
-        print(f"Using dtype: {dtype}")
+        # Determine dtype
+        if device_type_str == 'cpu':
+             dtype = torch.float32
+        elif torch.cuda.is_bf16_supported():
+             dtype = torch.bfloat16
+        else:
+             dtype = torch.float32
+        logger.info(f"Using dtype: {dtype}")
+
         model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
             torch_dtype=dtype,
             device_map="auto",
-            trust_remote_code=True
+            trust_remote_code=True # Needed for some models like Qwen/Phi
         )
         tokenizer = AutoTokenizer.from_pretrained(
             model_name_or_path,
             trust_remote_code=True
         )
+
+        # Set padding token if missing
         if tokenizer.pad_token is None:
-             # Set pad_token to eos_token if not defined
-             print("Warning: pad_token not set, using eos_token as pad_token.")
-             tokenizer.pad_token = tokenizer.eos_token
+            if tokenizer.eos_token is not None:
+                 logger.warning("pad_token not set, using eos_token as pad_token.")
+                 tokenizer.pad_token = tokenizer.eos_token
+                 tokenizer.pad_token_id = tokenizer.eos_token_id
+            else:
+                 logger.warning("Adding new pad token '<|pad|>'.")
+                 tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
+                 model.resize_token_embeddings(len(tokenizer)) # Important!
+
         model.eval()
-        MODEL_CACHE[model_name_or_path] = (model, tokenizer)
-        print(f"Model {model_name_or_path} loaded successfully using {dtype} onto devices: {model.hf_device_map}")
+        MODEL_CACHE[cache_key] = (model, tokenizer)
+        try: device_map_str = str(model.hf_device_map)
+        except Exception: device_map_str = "N/A"
+        logger.info(f"Model {model_name_or_path} loaded successfully using {dtype} onto devices: {device_map_str}")
         return model, tokenizer
 
     except Exception as e:
-        print(f"FATAL ERROR loading model {model_name_or_path}: {e}")
-        print("Check model name, internet connection, dependencies (torch, transformers, accelerate), and available VRAM.")
+        logger.exception(f"FATAL ERROR loading model {model_name_or_path}: {e}", exc_info=True)
+        logger.error("Check model name, internet connection, access permissions, dependencies, VRAM.")
         sys.exit(1)
 
-# --- format_multiple_choice_prompt function ---
-# Allow options=None for dummy data compatibility
-def format_multiple_choice_prompt(context: str, query: str, options: Optional[Dict[str, str]]) -> str:
-    """
-    Formats the prompt. Uses MC format if options are provided, otherwise uses a simpler format.
-    """
-    options_text = ""
-    # Check if options is a dictionary and has content
-    if isinstance(options, dict) and options:
-        options_text = "\n".join(
-            [f"{label}: {text}" for label, text in options.items() if text]
-        )
-    # Basic prompt structure
-    base_prompt = f"""--------------BEGIN DOCUMENTS--------------
+def format_generation_prompt(context: str, query: str, options: Dict[str, str], max_input_tokens: int, tokenizer) -> Optional[str]:
+    """Formats the prompt for the generation model, truncating context if needed."""
+    option_str = "\n".join([f"{key}: {value}" for key, value in options.items()])
+    base_prompt = f"""Context:
+{context}
 
-                    {context}
+Query: {query}
 
-                    --------------END DOCUMENTS--------------
+Options:
+{option_str}
 
-                    {query}"""
+Based *only* on the context provided, select the best option letter and provide the corresponding text. Your answer should start with the letter followed by a colon and the text (e.g., 'A: Text for option A').
 
-    if options_text:
-     # Append MC specific parts only if options exist
-        prompt = f"""{base_prompt}
-        {options_text}
+Answer: """
 
-        Please answer using the following format:
-        1. Begin your answer with the phrase "The correct answer is".
-        2. State the letter of the correct option (e.g., A, B, C, D, E).
-        3. Follow the letter with a colon and the exact text of the option you chose.
-        4. Make sure your answer is a single, concise sentence.
-
-        For example, if the correct answer to a question is option C, and the text for C is 'Acute Bronchitis', your answer should be:
-        'The correct answer is C: Acute Bronchitis.'
-        """
-    else:
-        # If no options (like in dummy data), just ask for a direct answer
-        prompt = f"""{base_prompt}
-
-                    Please provide a concise answer to the query based on the documents."""
-    return prompt
-
-# --- generate_actual_responses function (with Debugging) ---
-def generate_actual_responses(
-    model,
-    tokenizer,
-    context: str,
-    query: str,
-    options: Optional[Dict[str, str]], # Allow options=None
-    num_responses: int = 1,
-    temperature: float = 0.1,
-    max_new_tokens: int = 50,
-    top_p: float = 0.9,
-    max_input_tokens: int = 32000
-    ) -> list[str]:
-    """
-    Generates multiple responses for a single context-query pair using the loaded model.
-    Formats prompt based on whether options are provided. Includes debugging prints.
-    """
-    user_prompt_text = format_multiple_choice_prompt(context, query, options)
-    messages = [
-        {"role": "system", "content": """You are a highly skilled..."""}, # Keep system prompt concise for logging
-        {"role": "user", "content": user_prompt_text}
-    ]
+    # Simple truncation based on tokens
+    # A more sophisticated approach might summarize or select relevant context parts
     try:
-         prompt_to_tokenize = tokenizer.apply_chat_template(
-             messages,
-             tokenize=False,
-             add_generation_prompt=True
-         )
+        # Tokenize the full potential prompt to check length
+        full_tokens = tokenizer.encode(base_prompt, add_special_tokens=False) # Don't add special tokens yet for length check
+
+        if len(full_tokens) > max_input_tokens:
+            logger.warning(f"Input prompt token length ({len(full_tokens)}) exceeds max_input_tokens ({max_input_tokens}). Truncating context.")
+            # Calculate allowed context tokens (approximate)
+            non_context_prompt = f"""Context:\n\nQuery: {query}\n\nOptions:\n{option_str}\n\nAnswer: """
+            non_context_tokens = tokenizer.encode(non_context_prompt, add_special_tokens=False)
+            allowed_context_tokens = max_input_tokens - len(non_context_tokens) - 10 # Subtract buffer
+
+            if allowed_context_tokens <= 0:
+                 logger.error("Query and options alone exceed max_input_tokens. Cannot generate prompt.")
+                 return None
+
+            # Tokenize context and truncate
+            context_tokens = tokenizer.encode(context, add_special_tokens=False)
+            truncated_context_tokens = context_tokens[:allowed_context_tokens]
+            truncated_context = tokenizer.decode(truncated_context_tokens, skip_special_tokens=True)
+            logger.info(f"Context truncated to approx {allowed_context_tokens} tokens.")
+
+            # Rebuild prompt with truncated context
+            final_prompt = f"""Context:
+{truncated_context}
+
+Query: {query}
+
+Options:
+{option_str}
+
+Based *only* on the context provided, select the best option letter and provide the corresponding text. Your answer should start with the letter followed by a colon and the text (e.g., 'A: Text for option A').
+
+Answer: """
+        else:
+            final_prompt = base_prompt
+
+        return final_prompt
+
     except Exception as e:
-         print(f"  DEBUG: Error applying chat template: {e}. Using basic formatting.")
-         prompt_to_tokenize = f"System: [System Prompt Text]\nUser: {user_prompt_text}\nAssistant:"
+        logger.error(f"Error during prompt formatting/tokenization: {e}", exc_info=True)
+        return None
 
-    MAX_INPUT_TOKENS = max_input_tokens # Use value from args
-    inputs = tokenizer(
-        prompt_to_tokenize,
-        return_tensors="pt",
-        truncation=True,
-        max_length=MAX_INPUT_TOKENS
+
+@torch.no_grad()
+def generate_responses(model, tokenizer, prompt: str, num_responses: int, generation_config: GenerationConfig) -> List[str]:
+    """Generates responses using the loaded model."""
+    inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(model.device) # Add BOS/EOS if tokenizer configured
+    outputs = model.generate(
+        **inputs,
+        generation_config=generation_config,
+        num_return_sequences=num_responses,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.pad_token_id # Important for generation
     )
-    input_ids = inputs["input_ids"].to(model.device)
-    attention_mask = inputs["attention_mask"].to(model.device)
+    # Decode, skipping special tokens and the prompt part
+    input_length = inputs.input_ids.shape[1]
+    generated_texts = [
+        tokenizer.decode(output[input_length:], skip_special_tokens=True).strip()
+        for output in outputs
+    ]
+    return generated_texts
 
-    if input_ids.shape[-1] >= MAX_INPUT_TOKENS:
-         print(f"  Warning: Input prompt was truncated to {MAX_INPUT_TOKENS} tokens.")
-
-    responses = []
-    with torch.no_grad():
-        for i in range(num_responses):
-            try:
-                outputs = model.generate(
-                    input_ids,
-                    attention_mask=attention_mask,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=True if temperature > 0 and temperature != 1.0 else False, # Sample only if temp is not 0 or 1
-                    temperature=max(temperature, 1e-4), # Ensure temp is positive for sampling
-                    top_p=top_p,
-                    pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id, # Use pad_token_id if available
-                    eos_token_id=tokenizer.eos_token_id # Explicitly set EOS token
-                )
-                # Decode only the newly generated tokens
-                generated_ids = outputs[0][input_ids.shape[-1]:]
-                response_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
-                # Only append if the decoded text is not empty after stripping
-                if response_text.strip():
-                    responses.append(response_text.strip())
-                else:
-                    print(f"  DEBUG: Empty response generated for attempt {i+1}.")
-
-            except Exception as e:
-                 print(f"  - Error during generation for response {i+1}: {e}")
-                 # Don't append error messages to the list of valid responses
-                 # responses.append(f"[Generation Error: {e}]") # Avoid adding errors
-                 if 'out of memory' in str(e).lower():
-                     print("  - Out of memory error detected. Skipping remaining responses for this query.")
-                     # No need to fill with errors if we only count valid ones
-                     break # Exit inner loop
-    return responses
-
-# --- Main Script Logic ---
 def main():
-    parser = argparse.ArgumentParser(description="Generate LLM responses using Hugging Face models.")
-    # (Argument parsing remains the same)
+    parser = argparse.ArgumentParser(description="Generate responses from LLMs for LongHealth benchmark.")
     parser.add_argument("--model_name_or_path", type=str, required=True, help="Hugging Face model identifier.")
-    parser.add_argument("--input_file", type=str, required=True, help="Path to processed input JSONL file.")
-    parser.add_argument("--output_file", type=str, required=True, help="Path to save generated responses JSONL file.")
+    parser.add_argument("--input_file", type=str, required=True, help="Path to the processed input JSONL file.")
+    parser.add_argument("--output_file", type=str, required=True, help="Path to save the generated responses JSONL file.")
     parser.add_argument("--num_responses", type=int, default=1, help="Number of responses to generate per query.")
-    parser.add_argument("--temperature", type=float, default=0.1, help="Sampling temperature.")
-    parser.add_argument("--max_new_tokens", type=int, default=50, help="Maximum number of *new* tokens for the answer.")
-    parser.add_argument("--top_p", type=float, default=0.9, help="Nucleus sampling probability.")
-    parser.add_argument("--max_input_tokens", type=int, default=32000, help="Maximum number of tokens for input truncation.")
+    parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature.")
+    parser.add_argument("--max_new_tokens", type=int, default=50, help="Max new tokens to generate.")
+    parser.add_argument("--top_p", type=float, default=0.9, help="Top-p nucleus sampling.")
+    parser.add_argument("--max_input_tokens", type=int, default=32000, help="Maximum tokens allowed for the input prompt (context+query+options).")
+
     args = parser.parse_args()
 
-    print(f"--- Starting Actual Response Generation ---")
-    print(f"Model: {args.model_name_or_path}")
-    print(f"Input: {args.input_file}")
-    print(f"Output: {args.output_file}")
-    print(f"Responses per query: {args.num_responses}")
-    print(f"Temperature: {args.temperature}")
-    print(f"Max New Tokens: {args.max_new_tokens}")
-    print(f"Top P: {args.top_p}")
-    print(f"Max Input Tokens: {args.max_input_tokens}")
+    logger.info("--- Starting Actual Response Generation ---")
+    logger.info(f"Model: {args.model_name_or_path}")
+    logger.info(f"Input: {args.input_file}")
+    logger.info(f"Output: {args.output_file}")
+    logger.info(f"Responses per query: {args.num_responses}")
+    logger.info(f"Temperature: {args.temperature}")
+    logger.info(f"Max New Tokens: {args.max_new_tokens}")
+    logger.info(f"Top P: {args.top_p}")
+    logger.info(f"Max Input Tokens: {args.max_input_tokens}")
 
     # --- Determine Device ---
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        print(f"CUDA available. Using GPU: {torch.cuda.get_device_name(0)}")
+    device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if device_type == 'cuda':
+        logger.info(f"CUDA available. Using GPU: {torch.cuda.get_device_name(0)}")
         torch.cuda.empty_cache()
     else:
-        device = torch.device("cpu")
-        print("CUDA not available. Using CPU.")
+        logger.info("CUDA not available. Using CPU.")
 
     # --- Load Model ---
-    model, tokenizer = load_model_and_tokenizer(args.model_name_or_path, device)
+    model, tokenizer = load_model(args.model_name_or_path, device_type)
 
-    # --- Load Input Data ---
-    try:
-        with open(args.input_file, "r", encoding='utf-8') as infile:
-            data = [json.loads(line) for line in infile if line.strip()]
-    except FileNotFoundError:
-        print(f"Error: Input file not found at {args.input_file}")
+    # --- Load Data ---
+    data = load_json(args.input_file, load_by_line=True)
+    if data is None:
+        logger.error(f"Failed to load data from {args.input_file}")
         sys.exit(1)
-    except Exception as e:
-        print(f"Error reading or parsing input file {args.input_file}: {e}")
-        sys.exit(1)
+
+    # --- Prepare Generation Config ---
+    generation_config = GenerationConfig(
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature if args.temperature > 0 else None, # Temp must be > 0
+        top_p=args.top_p if args.temperature > 0 else None, # Top-p only used if temp > 0
+        do_sample=True if args.temperature > 0 else False, # Enable sampling only if temp > 0
+        num_return_sequences=args.num_responses,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.pad_token_id,
+    )
+    gen_params_dict = {
+        "temperature": args.temperature,
+        "max_new_tokens": args.max_new_tokens,
+        "top_p": args.top_p,
+    }
+
 
     # --- Generate Responses ---
-    all_model_responses = []
-    total_generated_count = 0 # Use a separate counter for valid responses added
+    results = []
+    valid_responses_count = 0
+    total_queries = len(data)
+
     for item in tqdm(data, desc=f"Generating with {os.path.basename(args.model_name_or_path)}"):
+        query_id = item.get("id")
         context = item.get("context", "")
         query = item.get("query", "")
-        options = item.get("options") # Returns None if key doesn't exist
-        query_id = item.get("id", "unknown_id")
+        options = item.get("options", {})
 
-        if not query or not context :
-            print(f"Warning: Skipping item {query_id} due to missing query or context.")
+        if not query_id or not context or not query or not options:
+            logger.warning(f"Skipping item due to missing fields: {item.get('id', 'N/A')}")
             continue
 
-        generated_texts = generate_actual_responses(
-            model=model,
-            tokenizer=tokenizer,
-            context=context,
-            query=query,
-            options=options, # Pass None if options missing
-            num_responses=args.num_responses,
-            temperature=args.temperature,
-            max_new_tokens=args.max_new_tokens,
-            top_p=args.top_p,
-            max_input_tokens=args.max_input_tokens
-        )
+        prompt = format_generation_prompt(context, query, options, args.max_input_tokens, tokenizer)
+        if prompt is None:
+            logger.warning(f"Skipping item {query_id} due to prompt formatting error (likely too long).")
+            continue
 
-        # --- Store results ---
-        # This loop only runs if generated_texts is not empty
-        for i, r_text in enumerate(generated_texts):
-            # Check if the response is valid (not empty and not an error placeholder)
-            if r_text and not r_text.startswith("[Generation Error"):
-                output_entry = item.copy() # Start with original item data
-                output_entry["model"] = args.model_name_or_path
-                output_entry["response_text"] = r_text # Add the generated text
-                output_entry["generation_params"] = { # Add params used
-                    "temperature": args.temperature,
-                    "max_new_tokens": args.max_new_tokens,
-                    "top_p": args.top_p,
-                    "index": i # Index within num_responses attempts
+        try:
+            generated_texts = generate_responses(model, tokenizer, prompt, args.num_responses, generation_config)
+
+            for i, text in enumerate(generated_texts):
+                result_item = {
+                    "id": query_id, # <<< FIX: Ensure ID is included
+                    "generated_text": text,
+                    "model_name": args.model_name_or_path,
+                    "generation_params": {**gen_params_dict, "index": i}
                 }
-                # Clean up large fields from original item before saving
-                if "context" in output_entry: del output_entry["context"]
-                # Keep options and correct answer if they exist in item
-                # if "options" in output_entry: del output_entry["options"]
+                results.append(result_item)
+                valid_responses_count += 1
 
-                all_model_responses.append(output_entry)
-                total_generated_count += 1 # Increment counter only for successful appends
+        except Exception as e:
+            logger.error(f"Error generating response for query ID {query_id}: {e}", exc_info=True)
+            # Append a placeholder or skip? Let's skip for now.
+            # results.append({"id": query_id, "error": str(e)})
+
 
     # --- Save Results ---
-    try:
-        os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
-        with open(args.output_file, "w", encoding='utf-8') as outfile:
-            for entry in all_model_responses: # This list might be empty
-                outfile.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        print(f"\n--- Generation Summary ---")
-        # Use the counter, not len(all_model_responses) directly
-        print(f"Generated and saved {total_generated_count} valid responses for {len(data)} queries.")
-        print(f"Responses saved to {args.output_file}")
-        print("Response generation finished.")
-    except IOError as e:
-        print(f"Error writing output file {args.output_file}: {e}")
-        sys.exit(1)
-    finally:
-         # Cleanup logic remains the same
-         global MODEL_CACHE
-         MODEL_CACHE = {}
-         if 'model' in locals() : del model
-         if 'tokenizer' in locals() : del tokenizer
-         if torch.cuda.is_available(): torch.cuda.empty_cache()
-         print("Cleaned up model resources.")
+    logger.info("\n--- Generation Summary ---")
+    logger.info(f"Generated and saved {valid_responses_count} valid responses for {total_queries} queries.")
+    save_json(results, args.output_file, save_by_line=True)
+    logger.info(f"Responses saved to {args.output_file}")
+    logger.info("Response generation finished.")
+
+    # --- Cleanup ---
+    # Clear cache and model from memory if needed
+    model_key = f"{args.model_name_or_path}_{device_type}"
+    if model_key in MODEL_CACHE:
+        del MODEL_CACHE[model_key]
+    model = None
+    tokenizer = None
+    if device_type == 'cuda':
+        torch.cuda.empty_cache()
+    logger.info("Cleaned up model resources.")
+
 
 if __name__ == "__main__":
     main()
