@@ -161,5 +161,3 @@ Here's how to test the specific features implemented in Workflow B:
     4.  Run Step 2c: `bash scripts/2c_evaluate_logprob_filter.sh`. This creates multiple output files (one per verifier).
     5.  Run Step 3a: `bash scripts/3a_analyze_logprob_agreement.sh`
     6.  **Verify:** Check the individual `eval_FIXED_GEN_*_verifier_*.json` files for each verifier's accuracy. Check `outputs/verifier_agreement_summary.json` for agreement statistics (e.g., `full_agreement_rate`).
-
-
