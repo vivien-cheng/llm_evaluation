@@ -19,7 +19,7 @@ The primary goal is to offer a structured way to generate, filter, and evaluate 
     * **Evaluation:** Utilizes the `hta_evaluation_harness` with the **LLM Judge** to evaluate the final filtered responses against the 5 core metrics using detailed rubrics.
 
 ## Repository Structure
-```
+```bash
 llm_evaluation/
 │
 ├── .env                       # <-- Stores your secret API keys (DO NOT COMMIT TO GIT)
