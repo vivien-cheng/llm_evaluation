@@ -1,4 +1,4 @@
-# MCQ Answer Evaluation Pipelines (LongHealth Example)
+# MCQ Answer Evaluation Pipeline (LongHealth Example)
 
 ## Project Goal
 
