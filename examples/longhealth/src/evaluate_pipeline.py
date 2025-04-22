@@ -14,15 +14,23 @@ try:
     from hta_evaluation_harness.evaluator import HTAEvaluator
     from hta_evaluation_harness.utils import load_json, save_json
 except ImportError:
-    print("Warning: Could not import hta_evaluation_harness directly. Ensure it's installed or PYTHONPATH is set.")
+    print("Warning: Could not import hta_evaluation_harness directly. Ensuring PYTHONPATH is set correctly...")
+    # Adjust path resolution for new directory structure
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+    example_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
+    if example_root not in sys.path:
+        sys.path.insert(0, example_root)
+        
     try:
         from hta_evaluation_harness.evaluator import HTAEvaluator
         from hta_evaluation_harness.utils import load_json, save_json
     except ImportError as e:
          print(f"FATAL ERROR: Cannot import HTA Evaluation Harness. Install it ('pip install -e .') or check PYTHONPATH.")
+         print(f"Project Root: {project_root}")
+         print(f"Example Root: {example_root}")
          print(f"Sys.path: {sys.path}")
          print(f"Error: {e}")
          sys.exit(1)
