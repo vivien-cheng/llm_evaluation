@@ -1,3 +1,0 @@
-{"id": "q1", "context": "The patient reported mild headache. Vital signs stable.", "query": "What symptom was reported?", "options": {"A": "Fever", "B": "Headache", "C": "Cough"}, "correct_answer_letter": "B", "correct_answer_text": "Headache"}
-{"id": "q2", "context": "Plan: Continue medication X.", "query": "What is the plan?", "options": {"A": "Stop medication", "B": "Continue medication X", "C": "Start medication Y"}, "correct_answer_letter": "B", "correct_answer_text": "Continue medication X"}
-{"id": "q3", "context": "History of hypertension, currently controlled.", "query": "What relevant history is mentioned?", "options": {"A": "Diabetes", "B": "Asthma", "C": "Hypertension"}, "correct_answer_letter": "C", "correct_answer_text": "Hypertension"}
