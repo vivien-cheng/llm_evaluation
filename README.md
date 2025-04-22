@@ -37,6 +37,7 @@ logprob_filter_repo/
 │ ├── 2b_evaluate_llm_judge.sh # Workflow A
 │ ├── 2c_evaluate_logprob_filter.sh # Workflow B
 │ ├── 3a_analyze_logprob_agreement.sh # Workflow B
+│ ├── 4_rank_options_logprobs.sh # Verifier 
 │ ├── run_workflow_A_semantic.sh # Runs Workflow A
 │ └── run_workflow_B_logprob.sh # Runs Workflow B
 ├── src/
@@ -45,6 +46,7 @@ logprob_filter_repo/
 │ ├── filter_responses.py # Supports Step 2a
 │ ├── evaluate_pipeline.py # Supports Step 2b
 │ ├── evaluate_logprob_filter.py # Supports Step 2c
+│ ├── rank_options_logprobs.sh # Supports Step 4
 │ └── analyze_verifier_agreement.py # Supports Step 3a
 ├── data/
 │ ├── raw/ # benchmark_v5.json, longhealth_dummy.jsonl
